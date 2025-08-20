@@ -4,6 +4,7 @@ import '../services/db.dart';
 import 'inventory.dart';
 import 'pos.dart';
 import 'history.dart';
+import 'dashboard.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
@@ -110,11 +111,11 @@ class HomePage extends StatelessWidget {
                         description:
                             'Lihat dashboard dan analisis bisnis',
                         actionLabel: 'Lihat Dashboard',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Coming soon 🙂')),
-                          );
-                        },
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const DashboardPage()),
+                        ),
                       ),
                       _FeatureCard(
                         icon: Icons.receipt_long_outlined,

@@ -427,6 +427,129 @@ class DatabaseService {
     return images.path;
   }
 
+  // ---------------------------- Dashboard Analytics -----------------------------
+
+  Future<Map<String, dynamic>> getDashboardStats() async {
+    final db = await database;
+    
+    // Total revenue hari ini
+    final todayRevenue = sql.Sqflite.firstIntValue(await db.rawQuery('''
+      SELECT COALESCE(SUM(total), 0) 
+      FROM sales 
+      WHERE DATE(created_at) = DATE('now')
+    ''')) ?? 0;
+
+    // Total revenue bulan ini
+    final monthRevenue = sql.Sqflite.firstIntValue(await db.rawQuery('''
+      SELECT COALESCE(SUM(total), 0) 
+      FROM sales 
+      WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
+    ''')) ?? 0;
+
+    // Total transaksi hari ini
+    final todayTransactions = sql.Sqflite.firstIntValue(await db.rawQuery('''
+      SELECT COUNT(*) 
+      FROM sales 
+      WHERE DATE(created_at) = DATE('now')
+    ''')) ?? 0;
+
+    // Total transaksi bulan ini
+    final monthTransactions = sql.Sqflite.firstIntValue(await db.rawQuery('''
+      SELECT COUNT(*) 
+      FROM sales 
+      WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
+    ''')) ?? 0;
+
+    // Total produk
+    final totalProducts = sql.Sqflite.firstIntValue(await db.rawQuery('''
+      SELECT COUNT(*) FROM products
+    ''')) ?? 0;
+
+    // Total nilai inventory
+    final inventoryValue = sql.Sqflite.firstIntValue(await db.rawQuery('''
+      SELECT COALESCE(SUM(price * stock), 0) FROM products
+    ''')) ?? 0;
+
+    return {
+      'todayRevenue': todayRevenue,
+      'monthRevenue': monthRevenue,
+      'todayTransactions': todayTransactions,
+      'monthTransactions': monthTransactions,
+      'totalProducts': totalProducts,
+      'inventoryValue': inventoryValue,
+    };
+  }
+
+  Future<List<Map<String, Object?>>> getLowStockProducts({int threshold = 10}) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT id, name, category, stock, price
+      FROM products 
+      WHERE stock <= ?
+      ORDER BY stock ASC, name ASC
+      LIMIT 20
+    ''', [threshold]);
+  }
+
+  Future<List<Map<String, Object?>>> getTopSellingProducts({int limit = 10}) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT p.name, p.category, SUM(si.qty) as total_sold, SUM(si.qty * si.price) as revenue
+      FROM sale_items si
+      JOIN products p ON p.id = si.product_id
+      JOIN sales s ON s.id = si.sale_id
+      WHERE strftime('%Y-%m', s.created_at) = strftime('%Y-%m', 'now')
+      GROUP BY p.id, p.name, p.category
+      ORDER BY total_sold DESC
+      LIMIT ?
+    ''', [limit]);
+  }
+
+  Future<List<Map<String, Object?>>> getDailySales({int days = 7}) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT 
+        DATE(created_at) as date,
+        COUNT(*) as transaction_count,
+        COALESCE(SUM(total), 0) as revenue
+      FROM sales 
+      WHERE DATE(created_at) >= DATE('now', '-$days days')
+      GROUP BY DATE(created_at)
+      ORDER BY DATE(created_at) DESC
+    ''');
+  }
+
+  Future<Map<String, dynamic>> getTodayDetailedStats() async {
+    final db = await database;
+    
+    // Revenue dan transaksi hari ini
+    final revenueResult = await db.rawQuery('''
+      SELECT 
+        COALESCE(SUM(total), 0) as revenue,
+        COUNT(*) as transactions
+      FROM sales 
+      WHERE DATE(created_at) = DATE('now')
+    ''');
+    
+    // Items terjual hari ini
+    final itemsResult = await db.rawQuery('''
+      SELECT COALESCE(SUM(si.qty), 0) as items_sold
+      FROM sale_items si
+      JOIN sales s ON s.id = si.sale_id
+      WHERE DATE(s.created_at) = DATE('now')
+    ''');
+    
+    final revenue = (revenueResult.first['revenue'] as num?) ?? 0;
+    final transactions = (revenueResult.first['transactions'] as int?) ?? 0;
+    final itemsSold = (itemsResult.first['items_sold'] as int?) ?? 0;
+    
+    return {
+      'revenue': revenue,
+      'transactions': transactions,
+      'itemsSold': itemsSold,
+    };
+  }
+
   // Lama: addProduct(name, category, price, stock [, imagePath, description])
   Future<int> addProduct(
     String name,
