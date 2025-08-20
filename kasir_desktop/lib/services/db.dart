@@ -43,6 +43,20 @@ class DatabaseService {
   }
 
   Future<void> _createCoreTables(sql.Database db) async {
+    // Tabel users untuk autentikasi
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('admin', 'karyawan')),
+        full_name TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_login TEXT
+      );
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS products(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +158,7 @@ class DatabaseService {
     await _createCoreTables(db);
     await _migrateSalesTable(db);
     await _ensureSaleItemsTable(db);
+    await seedDefaultUsersIfEmpty();
   }
 
   Future<void> seedSampleProductsIfEmpty() async {
@@ -174,6 +189,122 @@ class DatabaseService {
       'stock': 20
     });
     await batch.commit(noResult: true);
+  }
+
+  Future<void> seedDefaultUsersIfEmpty() async {
+    final db = await database;
+    final cnt = sql.Sqflite.firstIntValue(
+          await db.rawQuery('SELECT COUNT(*) FROM users'),
+        ) ??
+        0;
+    if (cnt > 0) return;
+
+    final batch = db.batch();
+    
+    // Admin default
+    batch.insert('users', {
+      'username': 'admin',
+      'password': 'admin123',
+      'role': 'admin',
+      'full_name': 'Administrator',
+      'is_active': 1,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+    
+    // Karyawan default
+    batch.insert('users', {
+      'username': 'karyawan',
+      'password': 'karyawan123',
+      'role': 'karyawan',
+      'full_name': 'Karyawan',
+      'is_active': 1,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+    
+    await batch.commit(noResult: true);
+  }
+
+  // ------------------------------- User Management -----------------------------------
+
+  Future<Map<String, dynamic>?> authenticateUser(String username, String password) async {
+    final db = await database;
+    final result = await db.rawQuery('''
+      SELECT id, username, role, full_name, is_active
+      FROM users 
+      WHERE username = ? AND password = ? AND is_active = 1
+      LIMIT 1
+    ''', [username, password]);
+    
+    if (result.isEmpty) return null;
+    
+    final user = result.first;
+    
+    // Update last_login
+    await db.update(
+      'users',
+      {'last_login': DateTime.now().toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [user['id']],
+    );
+    
+    return {
+      'id': user['id'],
+      'username': user['username'],
+      'role': user['role'],
+      'full_name': user['full_name'],
+    };
+  }
+
+  Future<List<Map<String, Object?>>> getAllUsers() async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT id, username, role, full_name, is_active, created_at, last_login
+      FROM users
+      ORDER BY created_at DESC
+    ''');
+  }
+
+  Future<int> createUser({
+    required String username,
+    required String password,
+    required String role,
+    required String fullName,
+    bool isActive = true,
+  }) async {
+    final db = await database;
+    return db.insert('users', {
+      'username': username,
+      'password': password,
+      'role': role,
+      'full_name': fullName,
+      'is_active': isActive ? 1 : 0,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+  }
+
+  Future<int> updateUser({
+    required int id,
+    String? password,
+    String? role,
+    String? fullName,
+    bool? isActive,
+  }) async {
+    final db = await database;
+    final data = <String, dynamic>{};
+    
+    if (password != null) data['password'] = password;
+    if (role != null) data['role'] = role;
+    if (fullName != null) data['full_name'] = fullName;
+    if (isActive != null) data['is_active'] = isActive ? 1 : 0;
+    
+    if (data.isEmpty) return 0;
+    
+    return db.update('users', data, where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<int> deleteUser(int id) async {
+    final db = await database;
+    return db.delete('users', where: 'id = ?', whereArgs: [id]);
   }
 
   // ------------------------------- Produk -----------------------------------

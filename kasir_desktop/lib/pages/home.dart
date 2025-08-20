@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/db.dart';
+import '../services/auth_service.dart';
 import 'inventory.dart';
 import 'pos.dart';
 import 'history.dart';
@@ -9,54 +10,95 @@ import 'dashboard.dart';
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
 
+  void _showLogoutDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Logout'),
+        content: const Text('Apakah Anda yakin ingin logout?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () {
+              AuthService.instance.logout();
+              Navigator.pop(context);
+            },
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red,
+            ),
+            child: const Text('Logout'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final authService = AuthService.instance;
+    
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
-        title: const Text(
-          'Kasir & Inventory',
-          style: TextStyle(fontWeight: FontWeight.w700),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Kasir & Inventory',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18),
+            ),
+            Text(
+              '${authService.userFullName} (${authService.userRole.toUpperCase()})',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w400),
+            ),
+          ],
         ),
         actions: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: FilledButton.tonal(
-              style: FilledButton.styleFrom(
-                foregroundColor: Colors.white,
-                backgroundColor: Colors.transparent,
-                side: const BorderSide(color: Colors.white24),
-                shape: const StadiumBorder(),
-              ),
-              onPressed: () async {
-                final c = await DatabaseService.instance.countProducts();
-                ScaffoldMessenger.of(context)
-                    .showSnackBar(SnackBar(content: Text('Total produk: $c')));
-              },
-              child: const Text('Dashboard'),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(right: 16),
-            child: FilledButton.tonal(
-              style: FilledButton.styleFrom(
-                foregroundColor: Colors.white,
-                backgroundColor: Colors.transparent,
-                side: const BorderSide(color: Colors.white24),
-                shape: const StadiumBorder(),
-              ),
-              onPressed: () {},
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.home_outlined, size: 18),
-                  SizedBox(width: 6),
-                  Text('Beranda'),
-                ],
+          if (authService.hasPermission('dashboard')) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: FilledButton.tonal(
+                style: FilledButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  backgroundColor: Colors.transparent,
+                  side: const BorderSide(color: Colors.white24),
+                  shape: const StadiumBorder(),
+                ),
+                onPressed: () async {
+                  final c = await DatabaseService.instance.countProducts();
+                  ScaffoldMessenger.of(context)
+                      .showSnackBar(SnackBar(content: Text('Total produk: $c')));
+                },
+                child: const Text('Quick Stats'),
               ),
             ),
+          ],
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.account_circle),
+            onSelected: (value) {
+              switch (value) {
+                case 'logout':
+                  _showLogoutDialog(context);
+                  break;
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'logout',
+                child: Row(
+                  children: [
+                    const Icon(Icons.logout, size: 18),
+                    const SizedBox(width: 8),
+                    const Text('Logout'),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -75,13 +117,9 @@ class HomePage extends StatelessWidget {
               LayoutBuilder(
                 builder: (context, c) {
                   final narrow = c.maxWidth < 900;
-                  return GridView.count(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    crossAxisSpacing: 20,
-                    mainAxisSpacing: 20,
-                    crossAxisCount: narrow ? 1 : 4,
-                    children: [
+                  final features = <Widget>[
+                    // Kasir - tersedia untuk semua role
+                    if (authService.hasPermission('pos'))
                       _FeatureCard(
                         icon: Icons.shopping_cart_outlined,
                         title: 'Kasir',
@@ -93,18 +131,26 @@ class HomePage extends StatelessWidget {
                           MaterialPageRoute(builder: (_) => const PosPage()),
                         ),
                       ),
+                    
+                    // Inventory - tersedia untuk semua role
+                    if (authService.hasPermission('inventory_view'))
                       _FeatureCard(
                         icon: Icons.all_inbox_outlined,
                         title: 'Inventory',
                         description:
                             'Kelola data produk dan stok barang',
-                        actionLabel: 'Kelola Inventory',
+                        actionLabel: authService.hasPermission('inventory_full') 
+                            ? 'Kelola Inventory' 
+                            : 'Lihat Inventory',
                         onTap: () => Navigator.push(
                           context,
                           MaterialPageRoute(
                               builder: (_) => const InventoryPage()),
                         ),
                       ),
+                    
+                    // Dashboard - hanya admin
+                    if (authService.hasPermission('dashboard'))
                       _FeatureCard(
                         icon: Icons.bar_chart,
                         title: 'Dashboard',
@@ -117,6 +163,9 @@ class HomePage extends StatelessWidget {
                               builder: (_) => const DashboardPage()),
                         ),
                       ),
+                    
+                    // History - hanya admin
+                    if (authService.hasPermission('history'))
                       _FeatureCard(
                         icon: Icons.receipt_long_outlined,
                         title: 'Riwayat',
@@ -129,7 +178,36 @@ class HomePage extends StatelessWidget {
                               builder: (_) => const SalesHistoryPage()),
                         ),
                       ),
-                    ],
+                  ];
+
+                  // Center cards if less than 4 features
+                  if (features.length < 4 && !narrow) {
+                    return Center(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: features.length * 300.0 + (features.length - 1) * 20,
+                        ),
+                        child: GridView.count(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          crossAxisSpacing: 20,
+                          mainAxisSpacing: 20,
+                          crossAxisCount: features.length,
+                          childAspectRatio: 1.0,
+                          children: features,
+                        ),
+                      ),
+                    );
+                  }
+                  
+                  // Default grid for 4+ features or narrow screens
+                  return GridView.count(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    crossAxisSpacing: 20,
+                    mainAxisSpacing: 20,
+                    crossAxisCount: narrow ? 1 : 4,
+                    children: features,
                   );
                 },
               ),
