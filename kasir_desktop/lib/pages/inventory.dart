@@ -22,7 +22,7 @@ class _InventoryPageState extends State<InventoryPage> {
 
   void _reload() {
     _future = DatabaseService.instance
-        .searchProducts(query: _query, category: _category);
+        .products(query: _query, category: _category);
     setState(() {});
   }
 
@@ -175,8 +175,7 @@ class _InventoryPageState extends State<InventoryPage> {
                                 tooltip: 'Tambah stok',
                                 onPressed: () async {
                                   await DatabaseService.instance
-                                      .updateStock(
-                                          productId: id, stock: stock + 1);
+                                      .updateStock(id, stock + 1);
                                   _reload();
                                 },
                                 icon: const Icon(Icons.add),

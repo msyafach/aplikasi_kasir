@@ -1,192 +1,448 @@
+// lib/services/db.dart
 import 'dart:io';
+
 import 'package:path/path.dart' as p;
-import 'package:sqflite_common/sqlite_api.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart' as sql;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 class DatabaseService {
   DatabaseService._();
   static final DatabaseService instance = DatabaseService._();
 
-  Database? _db;
-  Database get db => _db!;
+  sql.Database? _db;
 
-  Future<String> _baseDir() async => Directory.current.path;
+  // ----------------------------- Open / Schema ------------------------------
 
-  Future<String> imagesDir() async {
-    final base = await _baseDir();
-    final dir = Directory(p.join(base, 'images'));
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return dir.path;
+  Future<sql.Database> get database async {
+    if (_db != null) return _db!;
+    _db = await _open();
+    return _db!;
   }
 
-  Future<void> open() async {
-    if (_db != null) return;
-    final path = p.join(await _baseDir(), 'kasir_inventory.db');
-    _db = await databaseFactory.openDatabase(
-      path,
-      options: OpenDatabaseOptions(
-        version: 2,
-        onCreate: (db, v) async => _createV2(db),
-        onUpgrade: (db, oldV, newV) async {
-          if (oldV < 2) {
-            await db.execute('ALTER TABLE products ADD COLUMN category TEXT;');
-            await db.execute('ALTER TABLE products ADD COLUMN description TEXT;');
-            await db.execute('ALTER TABLE products ADD COLUMN image_path TEXT;');
-            await db.execute('ALTER TABLE products ADD COLUMN active INTEGER NOT NULL DEFAULT 1;');
-          }
-        },
-      ),
+  Future<sql.Database> _open() async {
+    // FFI untuk desktop (Windows/macOS/Linux)
+    sqfliteFfiInit();
+    sql.databaseFactory = databaseFactoryFfi;
+
+    final dir = await getApplicationSupportDirectory();
+    await dir.create(recursive: true);
+    final dbPath = p.join(dir.path, 'kasir_pos.sqlite');
+
+    final db = await sql.openDatabase(
+      dbPath,
+      version: 1,
+      onCreate: (db, _) async => _createCoreTables(db),
+      onOpen: (db) async {
+        await _createCoreTables(db); // pastikan ada
+        await _migrateSalesTable(db); // tambah kolom baru bila kurang
+        await _ensureSaleItemsTable(db);
+      },
     );
+    return db;
   }
 
-  Future<void> _createV2(Database db) async {
+  Future<void> _createCoreTables(sql.Database db) async {
     await db.execute('''
-      CREATE TABLE IF NOT EXISTS products (
+      CREATE TABLE IF NOT EXISTS products(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        price REAL NOT NULL,
-        stock INTEGER NOT NULL DEFAULT 0,
         category TEXT,
         description TEXT,
-        image_path TEXT,
-        active INTEGER NOT NULL DEFAULT 1
-      )
+        price REAL NOT NULL DEFAULT 0,
+        stock INTEGER NOT NULL DEFAULT 0,
+        image_path TEXT
+      );
     ''');
+
     await db.execute('''
-      CREATE TABLE IF NOT EXISTS sales (
+      CREATE TABLE IF NOT EXISTS sales(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT NOT NULL,
-        total REAL NOT NULL
-      )
+        total REAL NOT NULL,
+        discount REAL NOT NULL DEFAULT 0,
+        tax REAL NOT NULL DEFAULT 0,
+        cash REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
     ''');
+
     await db.execute('''
-      CREATE TABLE IF NOT EXISTS sale_items (
+      CREATE TABLE IF NOT EXISTS sale_items(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sale_id INTEGER NOT NULL,
         product_id INTEGER NOT NULL,
-        quantity INTEGER NOT NULL,
+        qty INTEGER NOT NULL,
         price REAL NOT NULL,
-        FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,
-        FOREIGN KEY (product_id) REFERENCES products(id)
-      )
+        FOREIGN KEY(sale_id) REFERENCES sales(id),
+        FOREIGN KEY(product_id) REFERENCES products(id)
+      );
+    ''');
+
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);');
+    await db
+        .execute('CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at);');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);');
+  }
+
+  Future<Set<String>> _tableColumns(sql.Database db, String table) async {
+    final info = await db.rawQuery("PRAGMA table_info($table)");
+    return info.map((e) => (e['name'] as String).toLowerCase()).toSet();
+  }
+
+  Future<void> _migrateSalesTable(sql.Database db) async {
+    final cols = await _tableColumns(db, 'sales');
+
+    if (!cols.contains('discount')) {
+      await db.execute(
+          "ALTER TABLE sales ADD COLUMN discount REAL NOT NULL DEFAULT 0");
+    }
+    if (!cols.contains('tax')) {
+      await db.execute("ALTER TABLE sales ADD COLUMN tax REAL NOT NULL DEFAULT 0");
+    }
+    if (!cols.contains('cash')) {
+      await db.execute("ALTER TABLE sales ADD COLUMN cash REAL NOT NULL DEFAULT 0");
+    }
+    if (!cols.contains('created_at')) {
+      await db.execute("ALTER TABLE sales ADD COLUMN created_at TEXT");
+      await db.rawUpdate(
+          "UPDATE sales SET created_at = COALESCE(created_at, datetime('now')) WHERE created_at IS NULL OR created_at = ''");
+      await db.execute(
+          "CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at)");
+    }
+  }
+
+  Future<void> _ensureSaleItemsTable(sql.Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sale_items(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sale_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        qty INTEGER NOT NULL,
+        price REAL NOT NULL,
+        FOREIGN KEY(sale_id) REFERENCES sales(id),
+        FOREIGN KEY(product_id) REFERENCES products(id)
+      );
     ''');
   }
 
-  Future<int> countProducts() async {
-    final res = await db.rawQuery('SELECT COUNT(*) as c FROM products');
-    return _firstInt(res, 'c');
+  // Utility publik
+  Future<bool> isSchemaReady() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT name FROM sqlite_master
+      WHERE type='table' AND name IN ('products','sales','sale_items');
+    ''');
+    return rows.length == 3;
   }
 
-  Future<List<Map<String, Object?>>> searchProducts({String? query, String? category}) async {
-    final where = <String>[];
-    final args = <Object?>[];
-    if (query != null && query.isNotEmpty) {
-      where.add('(name LIKE ? OR COALESCE(description, "") LIKE ?)');
-      args..add('%$query%')..add('%$query%');
-    }
-    if (category != null && category.isNotEmpty) {
-      where.add('COALESCE(category, "") = ?');
-      args.add(category);
-    }
-    return db.query(
-      'products',
-      where: where.isEmpty ? null : where.join(' AND '),
-      whereArgs: where.isEmpty ? null : args,
-      orderBy: 'name COLLATE NOCASE ASC',
-    );
+  Future<void> initSchema() async {
+    final db = await database;
+    await _createCoreTables(db);
+    await _migrateSalesTable(db);
+    await _ensureSaleItemsTable(db);
   }
 
-  // === dipakai halaman Kasir ===
-  Future<List<Map<String, Object?>>> productsForSale({String? query, String? category}) async {
-    final where = <String>['active = 1'];
-    final args = <Object?>[];
-    if (query != null && query.isNotEmpty) {
-      where.add('(name LIKE ? OR COALESCE(description, "") LIKE ?)');
-      args..add('%$query%')..add('%$query%');
-    }
-    if (category != null && category.isNotEmpty) {
-      where.add('COALESCE(category, "") = ?');
-      args.add(category);
-    }
-    return db.query(
-      'products',
-      where: where.join(' AND '),
-      whereArgs: args,
-      orderBy: 'name COLLATE NOCASE ASC',
-    );
+  Future<void> seedSampleProductsIfEmpty() async {
+    final db = await database;
+    final cnt = sql.Sqflite.firstIntValue(
+          await db.rawQuery('SELECT COUNT(*) FROM products'),
+        ) ??
+        0;
+    if (cnt > 0) return;
+
+    final batch = db.batch();
+    batch.insert('products', {
+      'name': 'Air Mineral 600ml',
+      'category': 'Minuman',
+      'price': 4000,
+      'stock': 50
+    });
+    batch.insert('products', {
+      'name': 'Kopi Sachet',
+      'category': 'Minuman',
+      'price': 3000,
+      'stock': 80
+    });
+    batch.insert('products', {
+      'name': 'Roti Tawar',
+      'category': 'Makanan',
+      'price': 12000,
+      'stock': 20
+    });
+    await batch.commit(noResult: true);
   }
 
-  Future<List<String>> getCategories() async {
-    final rows = await db.rawQuery(
-      'SELECT DISTINCT category FROM products '
-      'WHERE category IS NOT NULL AND category <> "" '
-      'ORDER BY category');
-    return rows.map((e) => (e['category'] as String)).toList();
-  }
+  // ------------------------------- Produk -----------------------------------
 
-  Future<int> addProduct({
+  Future<int> insertProduct({
     required String name,
-    required double price,
-    required int stock,
     String? category,
     String? description,
+    required num price,
+    required int stock,
     String? imagePath,
-    bool active = true,
   }) async {
+    final db = await database;
     return db.insert('products', {
       'name': name,
-      'price': price,
-      'stock': stock,
       'category': category,
       'description': description,
+      'price': price,
+      'stock': stock,
       'image_path': imagePath,
-      'active': active ? 1 : 0,
     });
   }
 
-  Future<int> updateStock({required int productId, required int stock}) async {
-    return db.update('products', {'stock': stock}, where: 'id = ?', whereArgs: [productId]);
+  Future<int> updateProduct({
+    required int id,
+    required String name,
+    String? category,
+    String? description,
+    required num price,
+    required int stock,
+    String? imagePath,
+  }) async {
+    final db = await database;
+    return db.update(
+      'products',
+      {
+        'name': name,
+        'category': category,
+        'description': description,
+        'price': price,
+        'stock': stock,
+        'image_path': imagePath,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
-  Future<void> deleteProduct(int id) async {
-    await db.delete('products', where: 'id = ?', whereArgs: [id]);
+  Future<int> deleteProduct(int id) async {
+    final db = await database;
+    return db.delete('products', where: 'id = ?', whereArgs: [id]);
   }
 
-  /// Simpan transaksi penjualan (total sudah NET setelah diskon)
-  /// items = [{'product_id': int, 'qty': int, 'price': num}]
+  /// Ambil daftar kategori unik
+  Future<List<String>> getCategories() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT DISTINCT COALESCE(NULLIF(TRIM(category),''),'Tanpa Kategori') AS cat
+      FROM products
+      ORDER BY cat
+    ''');
+    return rows.map((e) => (e['cat'] as String)).toList();
+  }
+
+  /// List produk dengan filter pencarian & kategori.
+  Future<List<Map<String, Object?>>> products({
+    String? query,
+    String? category,
+    bool inStockOnly = false,
+    String orderBy = 'name COLLATE NOCASE ASC',
+    int? limit,
+    int? offset,
+  }) async {
+    final db = await database;
+
+    final where = <String>[];
+    final args = <Object?>[];
+
+    if (query != null && query.trim().isNotEmpty) {
+      where.add('(name LIKE ? OR description LIKE ?)');
+      final like = '%${query.trim()}%';
+      args..add(like)..add(like);
+    }
+    if (category != null && category.isNotEmpty) {
+      where.add('category = ?');
+      args.add(category);
+    }
+    if (inStockOnly) {
+      where.add('stock > 0');
+    }
+
+    final whereSql = where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}';
+    final lim = (limit == null) ? '' : 'LIMIT $limit';
+    final off = (offset == null) ? '' : 'OFFSET $offset';
+
+    return db.rawQuery('''
+      SELECT id, name, category, description, price, stock, image_path
+      FROM products
+      $whereSql
+      ORDER BY $orderBy
+      $lim $off
+    ''', args);
+  }
+
+  /// Versi ringkas untuk POS
+  Future<List<Map<String, Object?>>> productsForSale({
+    String? query,
+    String? category,
+  }) {
+    // POS: tampilkan semua (stok 0 -> tombol tambah disabled)
+    return products(query: query, category: category, inStockOnly: false);
+  }
+
+  // ---------------------------- Transaksi / POS -----------------------------
+
+  /// Simpan transaksi + kurangi stok. `items`: {product_id, qty, price}
   Future<int> processSale({
     required List<Map<String, dynamic>> items,
     required num total,
-    DateTime? date,
+    num discount = 0,
+    num tax = 0,
+    num cash = 0,
   }) async {
-    return db.transaction<int>((txn) async {
+    final db = await database;
+
+    return await db.transaction<int>((txn) async {
       final saleId = await txn.insert('sales', {
-        'date': (date ?? DateTime.now()).toIso8601String(),
-        'total': total.toDouble(),
+        'total': total,
+        'discount': discount,
+        'tax': tax,
+        'cash': cash,
+        'created_at': DateTime.now().toIso8601String(),
       });
+
       for (final it in items) {
         final pid = it['product_id'] as int;
         final qty = it['qty'] as int;
-        final price = (it['price'] as num).toDouble();
+        final price = (it['price'] as num);
+
         await txn.insert('sale_items', {
           'sale_id': saleId,
           'product_id': pid,
-          'quantity': qty,
+          'qty': qty,
           'price': price,
         });
-        await txn.rawUpdate('UPDATE products SET stock = stock - ? WHERE id = ?', [qty, pid]);
+
+        // Kurangi stok (tidak biarkan minus)
+        final cur = sql.Sqflite.firstIntValue(
+              await txn.rawQuery('SELECT stock FROM products WHERE id = ?', [pid]),
+            ) ??
+            0;
+        final newStock = (cur - qty).clamp(0, 1 << 31);
+        await txn.update(
+          'products',
+          {'stock': newStock},
+          where: 'id = ?',
+          whereArgs: [pid],
+        );
       }
+
       return saleId;
     });
   }
 
-  int _firstInt(List<Map<String, Object?>> rows, String key) {
+  // ----------------------------- Riwayat ------------------------------------
+
+  Future<List<Map<String, Object?>>> salesHistory({
+    DateTime? from,
+    DateTime? to,
+    String? query,
+    int limit = 200,
+    int offset = 0,
+  }) async {
+    final db = await database;
+    final where = <String>[];
+    final args = <Object?>[];
+
+    if (from != null) {
+      where.add('datetime(created_at) >= datetime(?)');
+      args.add(from.toIso8601String());
+    }
+    if (to != null) {
+      where.add('datetime(created_at) <= datetime(?)');
+      args.add(to.toIso8601String());
+    }
+    if (query != null && query.isNotEmpty) {
+      where.add('CAST(id AS TEXT) LIKE ?');
+      args.add('%$query%');
+    }
+
+    final whereSql = where.isEmpty ? '' : 'WHERE ${where.join(' AND ')}';
+
+    return db.rawQuery('''
+      SELECT s.id, s.total, s.discount, s.tax, s.cash, s.created_at,
+             (SELECT COALESCE(SUM(qty),0) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
+      FROM sales s
+      $whereSql
+      ORDER BY s.id DESC
+      LIMIT $limit OFFSET $offset
+    ''', args);
+  }
+
+  Future<List<Map<String, Object?>>> saleItems(int saleId) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT si.qty, si.price, p.name
+      FROM sale_items si
+      JOIN products p ON p.id = si.product_id
+      WHERE si.sale_id = ?
+    ''', [saleId]);
+  }
+
+  // ======== COMPAT SHIMS: agar kode lama tetap jalan ========
+
+  // Lama: DatabaseService.instance.open()
+  Future<void> open() async {
+    await database;     // memastikan kebuka
+    await initSchema(); // memastikan tabel ada
+  }
+
+  // Lama: countProducts()
+  Future<int> countProducts() async {
+    final db = await database;
+    final rows = await db.rawQuery('SELECT COUNT(*) AS c FROM products');
     if (rows.isEmpty) return 0;
-    final v = rows.first[key];
+    final v = rows.first['c'];
     if (v is int) return v;
-    if (v is BigInt) return v.toInt();
     if (v is num) return v.toInt();
-    if (v is String) return int.tryParse(v) ?? 0;
-    return 0;
+    return int.tryParse(v.toString()) ?? 0;
+  }
+
+  // Lama: searchProducts(query)
+  Future<List<Map<String, Object?>>> searchProducts(String query) {
+    return products(query: query);
+  }
+
+  // Lama: updateStock(id, stockBaru)
+  Future<int> updateStock(int id, int stock) async {
+    final db = await database;
+    return db.update('products', {'stock': stock},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  // Lama: imagesDir() -> folder simpan gambar
+  Future<String> imagesDir() async {
+    final dir = await getApplicationSupportDirectory();
+    final images = Directory(p.join(dir.path, 'images'));
+    if (!await images.exists()) {
+      await images.create(recursive: true);
+    }
+    return images.path;
+  }
+
+  // Lama: addProduct(name, category, price, stock [, imagePath, description])
+  Future<int> addProduct(
+    String name,
+    String? category,
+    num price,
+    int stock, [
+    String? imagePath,
+    String? description,
+  ]) async {
+    return insertProduct(
+      name: name,
+      category: category,
+      description: description,
+      price: price,
+      stock: stock,
+      imagePath: imagePath,
+    );
   }
 }

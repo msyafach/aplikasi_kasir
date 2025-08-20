@@ -1,122 +1,215 @@
 import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+
 import '../services/db.dart';
 
 class AddProductPage extends StatefulWidget {
   const AddProductPage({super.key});
+
   @override
   State<AddProductPage> createState() => _AddProductPageState();
 }
 
 class _AddProductPageState extends State<AddProductPage> {
-  final formKey = GlobalKey<FormState>();
-  final nameC = TextEditingController();
-  final catC = TextEditingController();
-  final priceC = TextEditingController(text: '0');
-  final stockC = TextEditingController(text: '0');
-  final descC = TextEditingController();
-  String? imagePath;
+  final _nameC = TextEditingController();
+  final _catC = TextEditingController();
+  final _priceC = TextEditingController(text: '0');
+  final _stockC = TextEditingController(text: '0');
+  final _descC = TextEditingController();
+
+  String? _pickedPath; // path file sumber (sementara)
+  String? _savedPath;  // path file setelah di-copy ke folder app
 
   @override
   void dispose() {
-    nameC.dispose(); catC.dispose(); priceC.dispose(); stockC.dispose(); descC.dispose();
+    _nameC.dispose();
+    _catC.dispose();
+    _priceC.dispose();
+    _stockC.dispose();
+    _descC.dispose();
     super.dispose();
   }
 
-  Future<void> pickImage() async {
-    final res = await FilePicker.platform.pickFiles(type: FileType.image);
-    if (res != null && res.files.single.path != null) {
-      final src = File(res.files.single.path!);
-      final imagesDir = await DatabaseService.instance.imagesDir();
-      final destPath = p.join(imagesDir, '${DateTime.now().millisecondsSinceEpoch}_${p.basename(src.path)}');
-      await src.copy(destPath);
-      setState(() => imagePath = destPath);
+  Future<void> _pickImage() async {
+    final res = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+      withData: false,
+    );
+    if (res == null || res.files.isEmpty) return;
+
+    final file = res.files.single;
+    if (file.path == null) return;
+
+    setState(() {
+      _pickedPath = file.path!;
+    });
+  }
+
+  Future<void> _save() async {
+    final name = _nameC.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Nama produk wajib diisi')));
+      return;
     }
+
+    final price = num.tryParse(_priceC.text.replaceAll('.', '').replaceAll(',', '.')) ?? 0;
+    final stock = int.tryParse(_stockC.text.replaceAll('.', '')) ?? 0;
+
+    String? finalImagePath;
+    if (_pickedPath != null && _pickedPath!.isNotEmpty) {
+      final folder = await DatabaseService.instance.imagesDir();
+      final ext = p.extension(_pickedPath!).toLowerCase(); // .jpg/.png
+      final fileName = 'img_${DateTime.now().millisecondsSinceEpoch}$ext';
+      final dest = p.join(folder, fileName);
+
+      try {
+        await File(_pickedPath!).copy(dest);
+        finalImagePath = dest;
+        setState(() {
+          _savedPath = dest;
+        });
+      } catch (e) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Gagal salin gambar: $e')));
+        return;
+      }
+    }
+
+    final id = await DatabaseService.instance.addProduct(
+      name,
+      _catC.text.trim().isEmpty ? null : _catC.text.trim(),
+      price,
+      stock,
+      finalImagePath,
+      _descC.text.trim().isEmpty ? null : _descC.text.trim(),
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Produk tersimpan (ID: $id)')),
+    );
+    Navigator.pop(context, true);
   }
 
   @override
   Widget build(BuildContext context) {
+    final t = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(leading: BackButton(onPressed: () => Navigator.pop(context)), title: const Text('Tambah Produk Baru')),
+      appBar: AppBar(
+        title: const Text('Tambah Produk'),
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+      ),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 900),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Form(
-              key: formKey,
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: nameC,
-                      decoration: const InputDecoration(labelText: 'Nama Produk *', border: OutlineInputBorder()),
-                      validator: (v) => (v == null || v.trim().isEmpty) ? 'Wajib diisi' : null,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller: catC,
-                      decoration: const InputDecoration(labelText: 'Kategori', hintText: 'Contoh: Makanan, Minuman', border: OutlineInputBorder()),
-                    ),
-                  ),
-                ]),
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Form Produk',
+                    style: t.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
                 const SizedBox(height: 12),
-                Row(children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: priceC, keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'Harga (Rp) *', border: OutlineInputBorder()),
-                      validator: (v) => (double.tryParse(v ?? '') == null) ? 'Angka tidak valid' : null,
-                    ),
+
+                Expanded(
+                  child: ListView(
+                    children: [
+                      TextField(
+                        controller: _nameC,
+                        decoration: const InputDecoration(
+                          labelText: 'Nama Produk *',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _catC,
+                        decoration: const InputDecoration(
+                          labelText: 'Kategori',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _priceC,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Harga (Rp)',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _stockC,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Stok',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _descC,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: 'Deskripsi',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      Row(
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: _pickImage,
+                            icon: const Icon(Icons.image_outlined),
+                            label: const Text('Pilih Gambar'),
+                          ),
+                          const SizedBox(width: 12),
+                          if (_pickedPath != null)
+                            Expanded(
+                              child: Text(
+                                p.basename(_pickedPath!),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      if (_pickedPath != null)
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.file(
+                            File(_pickedPath!),
+                            height: 160,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      if (_savedPath != null) ...[
+                        const SizedBox(height: 8),
+                        Text('Disalin ke: $_savedPath',
+                            style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      ],
+                    ],
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller: stockC, keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'Stok *', border: OutlineInputBorder()),
-                      validator: (v) => (int.tryParse(v ?? '') == null) ? 'Angka tidak valid' : null,
-                    ),
-                  ),
-                ]),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: descC, minLines: 3, maxLines: 5,
-                  decoration: const InputDecoration(labelText: 'Deskripsi', border: OutlineInputBorder()),
                 ),
-                const SizedBox(height: 12),
-                Row(children: [
-                  FilledButton.icon(onPressed: pickImage, icon: const Icon(Icons.image_outlined), label: const Text('Upload Gambar')),
-                  const SizedBox(width: 12),
-                  if (imagePath != null) ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.file(File(imagePath!), width: 96, height: 96, fit: BoxFit.cover),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _save,
+                    icon: const Icon(Icons.save_outlined),
+                    label: const Text('Simpan'),
                   ),
-                ]),
-                const SizedBox(height: 20),
-                Row(children: [
-                  FilledButton.icon(
-                    onPressed: () async {
-                      if (!formKey.currentState!.validate()) return;
-                      await DatabaseService.instance.addProduct(
-                        name: nameC.text.trim(),
-                        price: double.parse(priceC.text),
-                        stock: int.parse(stockC.text),
-                        category: catC.text.trim().isEmpty ? null : catC.text.trim(),
-                        description: descC.text.trim().isEmpty ? null : descC.text.trim(),
-                        imagePath: imagePath,
-                      );
-                      if (context.mounted) Navigator.pop(context, true);
-                    },
-                    icon: const Icon(Icons.save_alt), label: const Text('Simpan Produk'),
-                  ),
-                  const SizedBox(width: 12),
-                  OutlinedButton(onPressed: () => Navigator.pop(context), child: const Text('Batal')),
-                ]),
-              ]),
+                ),
+              ],
             ),
           ),
         ),

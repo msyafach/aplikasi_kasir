@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/db.dart';
 import 'inventory.dart';
 import 'pos.dart';
+import 'history.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
@@ -121,11 +122,11 @@ class HomePage extends StatelessWidget {
                         description:
                             'Riwayat transaksi dan cetak ulang nota',
                         actionLabel: 'Lihat Riwayat',
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Coming soon 🙂')),
-                          );
-                        },
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const SalesHistoryPage()),
+                        ),
                       ),
                     ],
                   );
